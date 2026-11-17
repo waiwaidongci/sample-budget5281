@@ -10,8 +10,23 @@
 ## 功能与方法
 - 触达计划、基线情景录入/编辑/删除；重名记录与非法数值明确拒绝。
 - 两比例实验样本量正态近似与二项Monte Carlo功效验证。独立等样本双组、双侧正态近似。模拟功效用于检验近似；低事件率应谨慎采用，正式实验须另行预注册。
+- 成簇预注册研究（家庭为随机化单位）：录入受众、家庭与分层归属；同户同组；各层两组人数差不超过该层最大户规模；未发布方案可重排，已发布家庭跨计划互斥且不挪组；可分流家庭不足时明确不可行，不拆户凑数。
 - 每次运行冻结参数、观测和SHA256。Redis任务由独立worker计算，写DB与共享产物卷；输入修改不会改写历史结果。
 - 负责人复核不可覆盖；审计记录登录、数据改动、排队、复核与导出；240请求/分钟限流、全局可恢复错误。
+
+## 成簇预注册流程
+1. 研究页声明 p0/p1、单位成本、预算、ICC 与模拟次数，再录入名单：`源记录编号, 家庭编号, 分层归属`。同一家庭不可跨层；名单变更会递增 `roster_version`。
+2. 生成方案时按分层整户做 LPT 分配（大户先排、组间按人数与户数取小），保证层内两组人数差 ≤ 该层最大户规模。草稿方案可重排；同一名单与参数下重复生成复用同一草稿，不产生重复冻结。
+3. 发布把每个家庭登记到全局占用总账（家庭唯一）。发布校验名单版本与内容校验和；源数据随后更新会让未发布方案转为 `stale` 并按新名单重算，已发布方案保持原依据。重试发布返回 `already_published`，不重复占用家庭。
+4. 从已发布方案排队研究时冻结：方案与名单版本、名单校验和、整户分组、ICC 与全部设计参数。worker 只读该冻结快照，之后名单再变也不影响本次研究。
+5. 功效按簇模拟：每户命中率服从 Beta（均值 p、户内相关 ICC），户内成员为伯努利；检验使用家庭聚类三明治方差。预算不足时按家庭键稳定顺序整户截断，不拆户凑数；名单或预算不足会在解释中明确标注。
+
+### 成簇接口
+`GET/POST /cluster-studies`，`GET /cluster-studies/{id}`；`GET/POST /cluster-studies/{id}/members`、`POST .../members/import`、`PUT/DELETE .../members/{member_id}`；`GET/POST /cluster-studies/{id}/plans`；`GET /cluster-plans/{id}`、`POST /cluster-plans/{id}/publish`；`GET /cluster-claims`；`GET/POST /cluster-runs`、`GET /cluster-runs/{id}`。角色与旧研究一致：观察员只读，分析师/负责人可写。
+
+### 旧独立研究与成簇研究的关系
+原有 `studies/observations/runs/reviews` 链路与算法保持不变，用于独立等样本双比例预算；成簇研究是另一套预注册实体（`cluster_studies/...`），只借用相同的 `required_n` 公式做设计效应换算。两套研究互不影响。
+
 
 ## 快速启动
 ```bash
@@ -37,7 +52,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 7. 09:35 admin打开业务复核，写明限制与下一步动作，归档后不可覆盖。
 8. 09:40 viewer读取复核意见并下载CSV，在操作留痕页核对下载事件。
 
-seed是3个前瞻设计情景，每个计划1条基线/候选概率、成本和预算记录；本题用于实验前预算设计，不伪造实验后点击事件。预算与单位成本采用十进制除法向下取整，预计总成本四舍五入至分（ROUND_HALF_UP），避免0.6÷(0.1×2)浮点误差少算样本。预算每组触达上限200000；不足一次双组触达时预算可行样本数与功效均为0。
+seed是3个前瞻设计情景，每个计划1条基线/候选概率、成本和预算记录；本题用于实验前预算设计，不伪造实验后点击事件。同时 seed 一份家庭名单成簇研究（3 个分层 × 30 户，户规模 1–4 不等），用于演示整户分流、发布锁定与按簇模拟功效。预算与单位成本采用十进制除法向下取整，预计总成本四舍五入至分（ROUND_HALF_UP），避免0.6÷(0.1×2)浮点误差少算样本。预算每组触达上限200000；不足一次双组触达时预算可行样本数与功效均为0。成簇研究的预计预算按“每户设计所需触达 × 单位成本”向上取整到分，预算不足以覆盖每组 2 户时按整户截断并把预算下功效记为 0。
 
 ## 技术与目录
 |部分|实现|
@@ -46,9 +61,9 @@ seed是3个前瞻设计情景，每个计划1条基线/候选概率、成本和�
 |API|Python3.11、FastAPI0.115、SQLAlchemy2、JWT、PBKDF2密码|
 |计算|NumPy2.2、SciPy1.15，固定seed42|
 |数据库|PostgreSQL16|
-|任务|Redis7持久队列，Python独立worker，心跳healthcheck|
+|任务|Redis7持久队列，Python独立worker，心跳healthcheck；`analysis-queue`与`cluster-queue`均由同一worker消费|
 
-`frontend/src/`分api、stores、types、components/common、hooks、pages、router、utils、constants；`backend/src/`分config、models、schemas、services、controllers、routes、middlewares、utils、constants；`backend/scripts/seed_demo.py`自然键插入、重复不覆盖修改；`backend/migrations/README.md`说明schema版本。
+`frontend/src/`分api、stores、types、components/common、hooks、pages、router、utils、constants；`backend/src/`分config、models、schemas、services、controllers、routes、middlewares、utils、constants；成簇研究在 `models/cluster.py`、`services/clusters.py`、`services/cluster_algorithm.py`、`routes/clusters.py`，前端在 `pages/cluster.js`、`pages/cluster-run.js`、`api/cluster.js`；`backend/scripts/seed_demo.py`自然键插入、重复不覆盖修改；`backend/migrations/README.md`说明schema版本。测试位于 `backend/tests/`（`python3 -m pytest tests`）。
 
 环境变量 `.env.example`：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO。开发时在本地venv安装backend/requirements.txt，设置DATABASE_URL、REDIS_URL、JWT_SECRET再运行uvicorn；前端开发经Nginx代理 `/api/` 到不带前缀的API。
 

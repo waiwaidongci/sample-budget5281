@@ -6,8 +6,34 @@ from src.config.domain import DOMAIN
 from src.models.user import User
 from src.models.study import Study
 from src.models.observation import Observation
-from src.models import run,review,audit
+from src.models.cluster import HouseholdStudy,AudienceMember
+from src.models import run,review,audit,cluster
 from src.utils.security import hash_password
+
+CLUSTER_NAME='榆灯·家庭触达预注册'
+CLUSTER_FILE='household-roster-202611.csv'
+
+
+def seed_cluster(db,rng):
+    study=db.scalar(select(HouseholdStudy).where(HouseholdStudy.name==CLUSTER_NAME))
+    if study: return
+    study=HouseholdStudy(name=CLUSTER_NAME,source_filename=CLUSTER_FILE,
+        description='以家庭为随机化单位的前瞻预注册名单 / 固定种子42 / 仅用于方法与流程演示',
+        p0=.08,p1=.12,cost_per_contact=.12,budget=3000,alpha=.05,power=.8,
+        simulations=10000,icc=.15,seed=42,roster_version=0,created_at='2026-11-01T00:00:00+00:00')
+    db.add(study);db.flush()
+    strata=('高活跃','中活跃','低活跃')
+    index=1
+    for stratum in strata:
+        for h in range(30):
+            household=f'{stratum[0]}-HH{h+1:03}'
+            size=int(rng.choice([1,1,2,2,3,4],p=[.3,.25,.22,.13,.07,.03]))
+            for _ in range(size):
+                db.add(AudienceMember(study_id=study.id,source_key=f'MH-{index:04}',household_key=household,
+                    stratum=stratum,created_at='2026-11-01T00:00:00+00:00'))
+                index+=1
+    db.flush()
+
 
 def seed():
     Base.metadata.create_all(engine)
@@ -37,7 +63,8 @@ def seed():
                 key=f'DEMO-{k+1}-{n+1:04}'
                 if not db.scalar(select(Observation.id).where(Observation.study_id==study.id,Observation.source_key==key)):
                     db.add(Observation(study_id=study.id,source_key=key,values=values))
+        seed_cluster(db,rng)
         db.commit()
-        counts={model.__tablename__:db.scalar(select(func.count()).select_from(model)) for model in (User,Study,Observation)}
+        counts={model.__tablename__:db.scalar(select(func.count()).select_from(model)) for model in (User,Study,Observation,HouseholdStudy,AudienceMember)}
         print(json.dumps(counts));return counts
 if __name__=='__main__': seed()
